@@ -1,0 +1,26 @@
+[
+  {
+    "image": "01_delivery_label.png",
+    "dimensions": "500x350",
+    "paddleocr_ms": 2308.4,
+    "total_fast_ms": 2508.1,
+    "findings_count": 3,
+    "risk_level": "low"
+  },
+  {
+    "image": "06_api_credentials.png",
+    "dimensions": "550x350",
+    "paddleocr_ms": 5946.7,
+    "total_fast_ms": 6112.6,
+    "findings_count": 2,
+    "risk_level": "low"
+  },
+  {
+    "image": "07_passwords.png",
+    "dimensions": "500x300",
+    "paddleocr_ms": 3300.3,
+    "total_fast_ms": 3451.8,
+    "findings_count": 3,
+    "risk_level": "low"
+  }
+]

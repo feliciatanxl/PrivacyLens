@@ -5,6 +5,7 @@ from .face_detector import detect_faces
 from .qr_detector import detect_qr
 from .metadata_detector import detect_metadata
 from .visual_detector import detect_visual_context
+from .paddle_ocr_detector import detect_text_paddle, is_paddle_ocr_available
 from .box_utils import normalize_box, parse_ocr_regions, calculate_iou
 
 __all__ = [
@@ -14,6 +15,8 @@ __all__ = [
     'detect_qr',
     'detect_metadata',
     'detect_visual_context',
+    'detect_text_paddle',
+    'is_paddle_ocr_available',
     'normalize_box',
     'parse_ocr_regions',
     'calculate_iou',

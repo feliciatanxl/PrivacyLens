@@ -2,6 +2,7 @@
 import io
 import json
 import threading
+import time
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -13,6 +14,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from transformers import AutoProcessor, Florence2ForConditionalGeneration
 
 from .privacy_engine import analyse_privacy
+from .detectors.paddle_ocr_detector import detect_text_paddle, is_paddle_ocr_available
 from .services.exposure_engine import explain_exposure
 from .services.redaction_service import redact_image, verify_redaction
 
@@ -28,6 +30,11 @@ model_lock = threading.Lock()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global processor, model
+    # Tune threads for CPU inference to avoid core thrashing
+    try:
+        torch.set_num_threads(8)
+    except Exception:
+        pass
     print('Loading Florence-2 model...')
     try:
         processor = AutoProcessor.from_pretrained(MODEL_ID)
@@ -62,20 +69,45 @@ app.add_middleware(
 )
 
 
-def florence_task(image: Image.Image, task: str):
-    """Run an inference task using Florence-2."""
+def florence_task(image: Image.Image, task: str, max_tokens: int = 256):
+    """Run an inference task using Florence-2 with greedy search and resolution scaling."""
     if processor is None or model is None:
         return {}
-    inputs = processor(text=task, images=image, return_tensors='pt').to(DEVICE)
+
+    w, h = image.size
+    max_dim = max(w, h)
+    scale = 1.0
+    infer_img = image
+    if max_dim > 768:
+        scale = 768.0 / max_dim
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        infer_img = image.resize((new_w, new_h), Image.Resampling.BILINEAR)
+
+    inputs = processor(text=task, images=infer_img, return_tensors='pt').to(DEVICE)
     with torch.inference_mode():
         tokens = model.generate(
             **inputs,
-            max_new_tokens=512,
-            num_beams=3,
+            max_new_tokens=max_tokens,
+            num_beams=1,
             do_sample=False
         )
     generated = processor.batch_decode(tokens, skip_special_tokens=False)[0]
-    return processor.post_process_generation(generated, task=task, image_size=image.size).get(task, {})
+    result = processor.post_process_generation(generated, task=task, image_size=infer_img.size).get(task, {})
+
+    if scale != 1.0 and result:
+        inv_scale = 1.0 / scale
+        if 'bboxes' in result:
+            result['bboxes'] = [
+                [int(round(c * inv_scale)) for c in box]
+                for box in result['bboxes']
+            ]
+        if 'quad_boxes' in result:
+            result['quad_boxes'] = [
+                [int(round(c * inv_scale)) for c in quad]
+                for quad in result['quad_boxes']
+            ]
+    return result
 
 
 @app.get('/health')
@@ -85,6 +117,7 @@ def health():
         'device': DEVICE,
         'model': MODEL_ID,
         'model_loaded': model is not None,
+        'paddleocr_available': is_paddle_ocr_available(),
         'version': '1.0.0'
     }
 
@@ -109,8 +142,12 @@ def _load_image_safely(file: UploadFile) -> Image.Image:
 
 
 @app.post('/analyze')
-def analyze(file: UploadFile = File(...)):
-    """Run comprehensive privacy analysis across all 15 categories."""
+def analyze(
+    file: UploadFile = File(...),
+    scan_mode: Optional[str] = Form('auto')
+):
+    """Run comprehensive privacy analysis across all 15 categories with hybrid model routing."""
+    t_start = time.perf_counter()
     original = _load_image_safely(file)
 
     # Transpose according to EXIF orientation so boxes align with visual orientation
@@ -119,26 +156,59 @@ def analyze(file: UploadFile = File(...)):
 
     objects = {}
     ocr = {}
+    ocr_engine_used = 'none'
 
-    if model is not None:
+    mode = (scan_mode or 'auto').strip().lower()
+
+    # 1. Primary OCR: Attempt ultra-fast PaddleOCR
+    if is_paddle_ocr_available():
+        try:
+            paddle_ocr = detect_text_paddle(image)
+            if paddle_ocr.get('labels'):
+                ocr = paddle_ocr
+                ocr_engine_used = 'paddleocr'
+        except Exception as exc:
+            print('Warning: PaddleOCR failed:', exc)
+
+    # 2. Decide whether Florence-2 OD is needed
+    run_od = mode in ('comprehensive', 'deep', 'full')
+    if mode == 'auto':
+        run_od = True
+
+    if model is not None and run_od:
         with model_lock:
             try:
-                objects = florence_task(image, '<OD>')
+                objects = florence_task(image, '<OD>', max_tokens=256)
             except Exception as exc:
                 print('Warning: Florence-2 <OD> failed:', exc)
+
+    # 3. Fallback to Florence-2 OCR if PaddleOCR didn't find text or was unavailable
+    if model is not None and not ocr.get('labels') and mode != 'fast_only':
+        with model_lock:
             try:
-                ocr = florence_task(image, '<OCR_WITH_REGION>')
+                florence_ocr = florence_task(image, '<OCR_WITH_REGION>', max_tokens=384)
+                if florence_ocr.get('labels'):
+                    ocr = florence_ocr
+                    ocr_engine_used = 'florence-2'
             except Exception as exc:
                 print('Warning: Florence-2 <OCR_WITH_REGION> failed:', exc)
 
     # Pass original so metadata detector can extract raw EXIF tags
     privacy = analyse_privacy(original, objects=objects, ocr=ocr)
     exposure = explain_exposure(privacy['findings'])
+    elapsed_ms = (time.perf_counter() - t_start) * 1000
 
     return {
         'image_size': {'width': image.width, 'height': image.height},
         'privacy': privacy,
         'exposure': exposure,
+        'metadata': {
+            'scan_mode': mode,
+            'ocr_engine': ocr_engine_used,
+            'execution_time_ms': round(elapsed_ms, 1),
+            'paddleocr_available': is_paddle_ocr_available(),
+            'florence_available': model is not None,
+        }
     }
 
 

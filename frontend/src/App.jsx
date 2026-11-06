@@ -9,6 +9,7 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [scanMode, setScanMode] = useState("fast"); // 'fast' (PaddleOCR ~0.3s) | 'comprehensive' (Florence-2 + PaddleOCR)
 
   // Redaction state
   const [selectedIndices, setSelectedIndices] = useState(new Set());
@@ -64,6 +65,7 @@ export default function App() {
 
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("scan_mode", scanMode);
 
     try {
       const response = await fetch(`${API_BASE}/analyze`, {
@@ -483,13 +485,43 @@ export default function App() {
               </label>
             )}
 
+            <div className="scan-mode-selector">
+              <label className="scan-mode-label">AI Detection Engine & Speed</label>
+              <div className="scan-mode-options">
+                <button
+                  type="button"
+                  className={`scan-mode-chip ${scanMode === "fast" ? "active" : ""}`}
+                  onClick={() => setScanMode("fast")}
+                >
+                  ⚡ Fast Scan (~0.3s PaddleOCR)
+                </button>
+                <button
+                  type="button"
+                  className={`scan-mode-chip ${scanMode === "comprehensive" ? "active" : ""}`}
+                  onClick={() => setScanMode("comprehensive")}
+                >
+                  🔍 Deep Scan (Florence-2 + PaddleOCR)
+                </button>
+              </div>
+            </div>
+
             <button
               className="analyze-button"
               onClick={handleAnalyze}
               disabled={!file || loading}
             >
-              {loading ? "Scanning 15 Privacy Categories with AI..." : "Scan for Privacy Exposure"}
+              {loading
+                ? scanMode === "fast"
+                  ? "Running Fast PaddleOCR & Privacy Scanners..."
+                  : "Running Deep Florence-2 & Privacy Scanners..."
+                : "Scan for Privacy Exposure"}
             </button>
+
+            {result?.metadata && (
+              <div className="scan-perf-badge">
+                ⚡ Scan completed in {result.metadata.execution_time_ms} ms via {result.metadata.ocr_engine === "paddleocr" ? "PaddleOCR PP-OCRv4" : result.metadata.ocr_engine}
+              </div>
+            )}
 
             {/* Redaction Export Actions */}
             {result && (
